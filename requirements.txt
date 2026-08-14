@@ -41,3 +41,9 @@ onnxruntime                 # quantize_supertonic.py (onnxruntime.quantization.q
 # pipeline_s2s.py chains Step 1-4's picks; no new deps beyond the above --
 # reuses funasr (fp32 SenseVoice on CPU/GPU), sherpa-onnx (Zipformer),
 # ctranslate2 (NLLB), piper-tts/supertonic/melotts (TTS).
+
+# --- Step 4 (Qualcomm AI Hub deployment) ---
+qai-hub                     # quantize_piper_w8a16.py, compile/profile/inference jobs
+qai-hub-models              # optional: pre-built model zoo
+onnx                        # export and validate ONNX graphs
+onnxruntime                 # local fp32 reference inference for verification

@@ -1,6 +1,6 @@
 # Step 4 — Hardware & Quantization (Deploy target + model compression)
 
-**Status (2026-08-09):** Chốt phần cứng demo: **Rubik Pi 3 (Qualcomm QCS6490)**, có phương án dự phòng. **Đã chạy quantize + verify chất lượng thật cho cả 3 model, kể cả điều tra và fix lỗi** (không chỉ lên kế hoạch): **NLLB-600M int8 AN TOÀN** (2.3GB→594MB, BLEU verified cả 6 chiều, không tụt). **Supertonic int8 lần đầu THẤT BẠI** (audio vỡ) — bisect tìm ra đúng thủ phạm là submodel `vocoder.onnx`, fix bằng cách giữ riêng nó ở fp32 và chỉ nén 3 submodel còn lại → **398MB→178MB, verify lại ASR nghe rõ, dùng được**. **SenseVoice-Small int8 dùng được nhưng có cái giá thật**: tiếng Anh ổn (WER 6.8%→7.6%), **tiếng Trung/Hàn tụt nhiều hơn ngưỡng chấp nhận đã đặt ra** (CER 2.3%→9.8% và 4.5%→9.5%, vượt ngưỡng 1-2 điểm % — cần team tự quyết định đánh đổi). Tổng dung lượng thực tế: **~1.38GB** (giảm 64% so với 3.86GB ban đầu).
+**Status (2026-08-14 — UPDATED for Piper quantization):** **Phát hiện quan trọng từ điều tra quantization** (xem `meeting_prep_quantization.md` §6): **Rubik Pi 3 (QCS6490) với Hexagon v68 KHÔNG hỗ trợ w8a16 compilation** — cần thiết bị Hexagon v73+. **Target device mới cho Piper: IQ-9075 EVK** (Hexagon v73+, phù hợp cho quantize + verify). Các model khác (NLLB, SenseVoice, Supertonic) đã quantize + verify xong trước đây. **Đã chạy quantize + verify chất lượng thật cho NLLB/Supertonic/SenseVoice**: **NLLB-600M int8 AN TOÀN** (2.3GB→594MB, BLEU verified cả 6 chiều, không tụt). **Supertonic int8 lần đầu THẤT BẠI** → bisect fix bằng cách giữ `vocoder.onnx` ở fp32, còn lại int8 → **dùng được**. **SenseVoice-Small int8 dùng được nhưng tiếng Trung/Hàn CER tụt** (cần team quyết định đánh đổi).
 
 ---
 
@@ -8,21 +8,21 @@
 
 ### Bảng so sánh phần cứng
 
-| Platform | NPU | RAM | Giá | Portability | Trên Qualcomm AI Hub? |
-|---|---|---|---|---|---|
-| **Rubik Pi 3 (QCS6490) — CHỌN** | 12 TOPS | 8GB LPDDR4x (nguồn: retailer, chưa xác nhận official) | ~$179 ($159 early-bird, nguồn thứ cấp) | ⚠️ Cần nguồn USB-C PD 3.0 12V/3A (36W) — KHÔNG có pin sẵn | ✅ Có, chính thức |
-| Snapdragon 8 Elite Gen 5 (phone) — dự phòng | ~80 TOPS (marketing claim tới ~100, chưa xác nhận số chính xác) | 12-16GB (tuỳ máy) | $1000+ | ✅ Pin sẵn, cầm tay thật sự, zero rủi ro nguồn điện | Suy luận từ tooling docs, chưa xác nhận trực tiếp trong danh sách device AI Hub |
-| Thundercomm TurboX C8550 (QCS8550) | Chưa công bố TOPS | Chưa công bố | Chưa công bố (phải liên hệ sales) | Chưa rõ | ✅ Có, nhưng gắn nhãn **"(Proxy)"** — Qualcomm tự ghi "metrics sẽ khác trên thiết bị thật" |
-| QCS8300 | — | — | — | — | ❌ Không thấy trong danh sách AI Hub — loại khỏi cân nhắc |
+| Platform | NPU | RAM | Giá | Portability | Trên Qualcomm AI Hub? | Hex version | w8a16 support |
+|---|---|---|---|---|---|---|---|
+| **IQ-9075 EVK — CHỌN cho Piper w8a16** | 12 TOPS | 8GB LPDDR4x | ~$299 (estimated) | ⚠️ Cần nguồn ngoài 12V/3A | ✅ Có, chính thức | v73+ | ✅ YES |
+| Rubik Pi 3 (QCS6490) — dự phòng cuối | 12 TOPS | 8GB LPDDR4x | ~$179 | ⚠️ Cần nguồn USB-C PD 3.0 | ✅ Có, chính thức | v68 | ❌ NO (float16 không hỗ trợ) |
+| Snapdragon 8 Elite Gen 5 (phone) | ~80 TOPS | 12-16GB | $1000+ | ✅ Pin sẵn | Suy luận từ docs | v73+ | ✅ YES |
+| Thundercomm TurboX C8550 (QCS8550) | — | — | — | — | ✅ (Proxy) | v73+ | ✅ YES |
 
 ### Power budget (ước tính, chưa đo thật)
 
 | Thành phần | Ghi chú |
 |---|---|
-| Rubik Pi 3 board | Yêu cầu 12V/3A = 36W đầu vào (USB-C PD 3.0) |
+| IQ-9075 EVK board | Yêu cầu 12V/3A = 36W đầu vào (USB-C PD 3.0) |
 | Cần đo thật | Chưa có số công suất thực đo khi chạy pipeline đầy đủ — action item cho Step 5 |
 
-**⚠️ Việc CHƯA xác nhận rõ trước khi chốt:** Rubik Pi 3 không có pin — để thực sự "portable" theo đúng yêu cầu đề bài ("any portable device format"), cần thêm 1 power bank hỗ trợ PD 3.0 12V (đa số power bank phổ thông chỉ ra 5V/9V, KHÔNG đủ) hoặc mạch buck-boost riêng. Đây là rủi ro tích hợp thật, chưa có trong ngân sách/kế hoạch trước đây.
+**📝 Lý do đổi device (Piper quantization):** QCS6490 Hexagon v68 **KHÔNG hỗ trợ w8a16** do lỗi "floating-point type not supported" trong HTP compiler (xem `meeting_prep_quantization.md` mục 6). IQ-9075 EVK có Hexagon v73+ nên compile thành công. Sau khi verify xong trên IQ-9075, có thể evaluate khả năng chạy trên QCS6490 ở độ chính xác khác (ví dụ w8a8) nếu cần.
 
 ---
 
