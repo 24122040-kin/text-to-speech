@@ -16,3 +16,4 @@ src/**/*.onnx
 src/**/*.onnx.json
 venv_pipeline/
 =*.*.*
+.hf_cache/
