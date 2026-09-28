@@ -69,10 +69,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DEVICE_NAME = "Dragonwing IQ-9075 EVK"
-COMPONENTS = ["encoder", "sdp", "flow", "decoder"]
+COMPONENTS = ["byte_text_encoder", "encoder", "sdp", "flow", "decoder"]
 
 # Official compile options per component
 COMPILE_OPTIONS = {
+    "byte_text_encoder": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
     "encoder": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
     "sdp": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
     "flow": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
@@ -80,6 +81,7 @@ COMPILE_OPTIONS = {
 }
 
 MODEL_FILES = {
+    "byte_text_encoder": "byte_text_encoder.onnx",
     "encoder": "piper_vi_encoder.onnx",
     "sdp": "piper_vi_sdp.onnx",
     "flow": "piper_vi_flow.onnx",

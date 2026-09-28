@@ -41,24 +41,9 @@ DEFAULT_LENGTH_SCALE = 1.0
 DEFAULT_NOISE_SCALE_W = 0.8
 
 
-def phonemize_vi(text: str, id_map: dict) -> list[int]:
-    """espeak-ng phonemize + phoneme->id (piper 1.6.1)."""
-    from piper.phonemize_espeak import EspeakPhonemizer
-    from piper.voice import phonemes_to_ids
-
-    phonemizer = EspeakPhonemizer()
-    phonemes = phonemizer.phonemize("vi", text)[0]
-    return phonemes_to_ids(phonemes, id_map)
-
-
-def prepare_input(phoneme_ids: list[int]):
-    """Pad/truncate to MAX_SEQ_LEN, return (x int32, x_lengths int32)."""
-    actual = min(len(phoneme_ids), MAX_SEQ_LEN)
-    if len(phoneme_ids) > MAX_SEQ_LEN:
-        phoneme_ids = phoneme_ids[:MAX_SEQ_LEN]
-    else:
-        phoneme_ids = phoneme_ids + [0] * (MAX_SEQ_LEN - len(phoneme_ids))
-    return np.array([phoneme_ids], dtype=np.int32), np.array([actual], dtype=np.int32)
+def prepare_input_npu_direct(upstream_byte_tensor: np.ndarray, upstream_length: np.ndarray):
+    
+    return upstream_byte_tensor.astype(np.int32), upstream_length.astype(np.int32)
 
 
 def generate_path_np(duration, mask):
@@ -88,7 +73,10 @@ class ComponentRunner:
         self.backend = backend
         if backend == "ort":
             import onnxruntime as ort
+            enc_file = "byte_text_encoder.onnx" if (self.onnx_dir / "byte_text_encoder.onnx").exists() else "piper_vi_encoder.onnx"
             self.sess = {
+                "byte_text_encoder": ort.InferenceSession(str(self.onnx_dir / enc_file),
+                                                          providers=["CPUExecutionProvider"]),
                 "encoder": ort.InferenceSession(str(self.onnx_dir / "piper_vi_encoder.onnx"),
                                                 providers=["CPUExecutionProvider"]),
                 "sdp": ort.InferenceSession(str(self.onnx_dir / "piper_vi_sdp.onnx"),
@@ -104,15 +92,17 @@ class ComponentRunner:
             from export_piper_components import (
                 Decoder, Encoder, Flow, SDP, build_model_from_onnx,
             )
+            from byte_text_pipeline import ByteLevelTextEncoder
             self.torch = torch
             gen = build_model_from_onnx(
                 str(self.onnx_dir.parent / "vi_VN-vais1000-medium.onnx"),
                 str(self.onnx_dir.parent / "vi_VN-vais1000-medium.onnx.json"))
+            self.byte_enc = ByteLevelTextEncoder()
             self.enc = Encoder(gen)
             self.sdp = SDP(gen)
             self.flow = Flow(gen)
             self.dec = Decoder(gen)
-            self.enc.eval(); self.sdp.eval(); self.flow.eval(); self.dec.eval()
+            self.byte_enc.eval(); self.enc.eval(); self.sdp.eval(); self.flow.eval(); self.dec.eval()
 
     def _run(self, comp, feeds):
         if self.backend == "ort":
@@ -120,12 +110,16 @@ class ComponentRunner:
         import torch
         tfeeds = {k: torch.from_numpy(v) for k, v in feeds.items()}
         with torch.no_grad():
-            model = getattr(self, {"encoder": "enc", "sdp": "sdp", "flow": "flow",
-                                   "decoder": "dec"}[comp])
+            model = getattr(self, {"byte_text_encoder": "byte_enc", "encoder": "enc",
+                                   "sdp": "sdp", "flow": "flow", "decoder": "dec"}[comp])
             out = model(*tfeeds.values())
             if not isinstance(out, tuple):
                 out = (out,)
             return [o.numpy() for o in out]
+
+    def byte_encoder(self, byte_indices, byte_lengths):
+        outs = self._run("byte_text_encoder", {"byte_indices": byte_indices, "byte_lengths": byte_lengths})
+        return outs[0], outs[1], outs[2], outs[3]
 
     def encoder(self, x, x_lengths):
         outs = self._run("encoder", {"x": x, "x_lengths": x_lengths})

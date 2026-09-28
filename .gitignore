@@ -17,3 +17,5 @@ src/**/*.onnx.json
 venv_pipeline/
 =*.*.*
 .hf_cache/
+REPORT_PIPER_STATUS_AND_DEPLOYMENT.md
+REPORT_PIPER_TECHNICAL_DEEPDIVE.md
