@@ -69,23 +69,38 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DEVICE_NAME = "Dragonwing IQ-9075 EVK"
-COMPONENTS = ["byte_text_encoder", "encoder", "sdp", "flow", "decoder"]
+COMPONENTS = [
+    "byte_text_encoder",
+    "encoder",
+    "sdp",
+    "monotonic_aligner",
+    "flow",
+    "decoder",
+    "overlap_add",
+    "audio_resampler",
+]
 
 # Official compile options per component
 COMPILE_OPTIONS = {
-    "byte_text_encoder": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
-    "encoder": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
-    "sdp": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
-    "flow": "--target_runtime qnn_context_binary --truncate_64bit_tensors --truncate_64bit_io",
-    "decoder": "--target_runtime qnn_context_binary --quantize_io",
+    "byte_text_encoder": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "encoder": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "sdp": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "monotonic_aligner": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "flow": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "decoder": "--target_runtime qnn_dlc --quantize_io",
+    "overlap_add": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
+    "audio_resampler": "--target_runtime qnn_dlc --truncate_64bit_tensors --truncate_64bit_io",
 }
 
 MODEL_FILES = {
     "byte_text_encoder": "byte_text_encoder.onnx",
     "encoder": "piper_vi_encoder.onnx",
     "sdp": "piper_vi_sdp.onnx",
+    "monotonic_aligner": "monotonic_aligner.onnx",
     "flow": "piper_vi_flow.onnx",
     "decoder": "piper_vi_decoder.onnx",
+    "overlap_add": "overlap_add.onnx",
+    "audio_resampler": "audio_resampler.onnx",
 }
 
 
