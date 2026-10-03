@@ -242,7 +242,7 @@ def stage_align(output_dir: Path):
     inputs = {
         "w_ceil": [np.asarray(w_ceil_list[i]).reshape(1, 1, MAX_SEQ_LEN).astype(np.float32) for i in range(n)],
         "x_mask": [np.asarray(x_mask_list[i]).reshape(1, 1, MAX_SEQ_LEN).astype(np.float32) for i in range(n)],
-        "y_lengths": [np.asarray(y_lengths_list[i]).flatten()[:1].astype(np.float32) for i in range(n)],
+        "y_lengths": [np.asarray(y_lengths_list[i]).flatten()[:1].astype(np.int32) for i in range(n)],
     }
 
     job = hub.submit_inference_job(
@@ -259,9 +259,13 @@ def stage_align(output_dir: Path):
 
     # Also format and save align.npz for downstream stages
     align_hw = load_hw_outputs(out_dir)
-    # Output 0: attn_squeezed, Output 1: y_mask
-    attn_list = [np.asarray(align_hw[0][i]).reshape(1, UPSAMPLED_MAX_SEQ_LEN, MAX_SEQ_LEN).astype(np.float32) for i in range(n)]
-    y_mask_list = [np.asarray(align_hw[1][i]).reshape(1, 1, UPSAMPLED_MAX_SEQ_LEN).astype(np.float32) for i in range(n)]
+    if align_hw[0][0].size == UPSAMPLED_MAX_SEQ_LEN * MAX_SEQ_LEN:
+        attn_hw, y_mask_hw = align_hw[0], align_hw[1]
+    else:
+        y_mask_hw, attn_hw = align_hw[0], align_hw[1]
+
+    attn_list = [np.asarray(attn_hw[i]).reshape(1, UPSAMPLED_MAX_SEQ_LEN, MAX_SEQ_LEN).astype(np.float32) for i in range(n)]
+    y_mask_list = [np.asarray(y_mask_hw[i]).reshape(1, 1, UPSAMPLED_MAX_SEQ_LEN).astype(np.float32) for i in range(n)]
     y_lens = [int(np.round(float(np.asarray(y_lengths_list[i]).flatten()[0]))) for i in range(n)]
 
     np.savez(
@@ -450,6 +454,8 @@ def stage_all(output_dir: Path):
     stage_align(output_dir)
     stage_flow(output_dir)
     stage_dec(output_dir)
+    stage_ola(output_dir)
+    stage_resample(output_dir)
     logger.info("🎉 100% Zero-CPU Pipeline execution completed successfully on Qualcomm NPU!")
 
 

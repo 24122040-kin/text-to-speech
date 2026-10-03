@@ -41,8 +41,32 @@ DEFAULT_LENGTH_SCALE = 1.0
 DEFAULT_NOISE_SCALE_W = 0.8
 
 
+def phonemize_vi(text: str, id_map: dict) -> list[int]:
+    """Phonemize Vietnamese text using piper phoneme map / fallback."""
+    ids = []
+    for ch in text.lower():
+        if ch in id_map:
+            v = id_map[ch]
+            if isinstance(v, list):
+                ids.extend(v)
+            else:
+                ids.append(v)
+        elif ch in (" ", "\t", "\n"):
+            ids.append(id_map.get(" ", 0))
+    if not ids:
+        ids = [0]
+    return ids
+
+
+def prepare_input(phoneme_ids: list[int], max_seq_len: int = MAX_SEQ_LEN) -> tuple[np.ndarray, np.ndarray]:
+    """Prepare static padded int32 input for encoder."""
+    arr = np.zeros((1, max_seq_len), dtype=np.int32)
+    l = min(len(phoneme_ids), max_seq_len)
+    arr[0, :l] = phoneme_ids[:l]
+    return arr, np.array([l], dtype=np.int32)
+
+
 def prepare_input_npu_direct(upstream_byte_tensor: np.ndarray, upstream_length: np.ndarray):
-    
     return upstream_byte_tensor.astype(np.int32), upstream_length.astype(np.int32)
 
 
@@ -66,7 +90,7 @@ def generate_path_np(duration, mask):
 
 
 class ComponentRunner:
-    """Run the 4 components via torch or onnxruntime."""
+    """Run the NPU components via torch or onnxruntime."""
 
     def __init__(self, onnx_dir: Path, backend: str = "ort"):
         self.onnx_dir = Path(onnx_dir)
@@ -81,10 +105,16 @@ class ComponentRunner:
                                                 providers=["CPUExecutionProvider"]),
                 "sdp": ort.InferenceSession(str(self.onnx_dir / "piper_vi_sdp.onnx"),
                                             providers=["CPUExecutionProvider"]),
+                "monotonic_aligner": ort.InferenceSession(str(self.onnx_dir / "monotonic_aligner.onnx"),
+                                                          providers=["CPUExecutionProvider"]) if (self.onnx_dir / "monotonic_aligner.onnx").exists() else None,
                 "flow": ort.InferenceSession(str(self.onnx_dir / "piper_vi_flow.onnx"),
                                              providers=["CPUExecutionProvider"]),
                 "decoder": ort.InferenceSession(str(self.onnx_dir / "piper_vi_decoder.onnx"),
                                                 providers=["CPUExecutionProvider"]),
+                "overlap_add": ort.InferenceSession(str(self.onnx_dir / "overlap_add.onnx"),
+                                                    providers=["CPUExecutionProvider"]) if (self.onnx_dir / "overlap_add.onnx").exists() else None,
+                "audio_resampler": ort.InferenceSession(str(self.onnx_dir / "audio_resampler.onnx"),
+                                                        providers=["CPUExecutionProvider"]) if (self.onnx_dir / "audio_resampler.onnx").exists() else None,
             }
         else:
             import torch
@@ -93,6 +123,9 @@ class ComponentRunner:
                 Decoder, Encoder, Flow, SDP, build_model_from_onnx,
             )
             from byte_text_pipeline import ByteLevelTextEncoder
+            from alignment_pipeline import MonotonicAligner
+            from overlap_add_pipeline import VectorizedOverlapAdd
+            from resampler_pipeline import build_sinc_resample_matrix
             self.torch = torch
             gen = build_model_from_onnx(
                 str(self.onnx_dir.parent / "vi_VN-vais1000-medium.onnx"),
@@ -100,18 +133,24 @@ class ComponentRunner:
             self.byte_enc = ByteLevelTextEncoder()
             self.enc = Encoder(gen)
             self.sdp = SDP(gen)
+            self.align = MonotonicAligner()
             self.flow = Flow(gen)
             self.dec = Decoder(gen)
-            self.byte_enc.eval(); self.enc.eval(); self.sdp.eval(); self.flow.eval(); self.dec.eval()
+            self.ola = VectorizedOverlapAdd()
+            self.byte_enc.eval(); self.enc.eval(); self.sdp.eval(); self.align.eval(); self.flow.eval(); self.dec.eval(); self.ola.eval()
 
     def _run(self, comp, feeds):
         if self.backend == "ort":
-            return self.sess[comp].run(None, feeds)
+            sess = self.sess.get(comp)
+            if sess is None:
+                raise RuntimeError(f"Session for {comp} is not available in {self.onnx_dir}")
+            return sess.run(None, feeds)
         import torch
         tfeeds = {k: torch.from_numpy(v) for k, v in feeds.items()}
         with torch.no_grad():
             model = getattr(self, {"byte_text_encoder": "byte_enc", "encoder": "enc",
-                                   "sdp": "sdp", "flow": "flow", "decoder": "dec"}[comp])
+                                   "sdp": "sdp", "monotonic_aligner": "align",
+                                   "flow": "flow", "decoder": "dec", "overlap_add": "ola"}[comp])
             out = model(*tfeeds.values())
             if not isinstance(out, tuple):
                 out = (out,)
@@ -131,6 +170,22 @@ class ComponentRunner:
                                  "noise_scale_w": noise_scale_w})
         return outs[0], outs[1]
 
+    def monotonic_aligner(self, w_ceil, x_mask, y_lengths):
+        w_in = np.asarray(w_ceil).reshape(1, 1, MAX_SEQ_LEN).astype(np.float32)
+        xm_in = np.asarray(x_mask).reshape(1, 1, MAX_SEQ_LEN).astype(np.float32)
+        yl_in = np.asarray(y_lengths).flatten()[:1].astype(np.int32)
+        if self.backend == "ort" and self.sess.get("monotonic_aligner") is not None:
+            outs = self._run("monotonic_aligner", {"w_ceil": w_in, "x_mask": xm_in, "y_lengths": yl_in})
+            return outs[0], outs[1]
+        # Torch fallback / direct vector execution
+        import torch
+        from alignment_pipeline import MonotonicAligner
+        aligner = getattr(self, "align", None) or MonotonicAligner()
+        aligner.eval()
+        with torch.no_grad():
+            a_t, ym_t = aligner(torch.from_numpy(w_in), torch.from_numpy(xm_in), torch.from_numpy(yl_in))
+            return a_t.numpy(), ym_t.numpy()
+
     def flow(self, m_p, logs_p, y_mask, attn_squeezed, noise_scale):
         outs = self._run("flow", {"m_p": m_p, "logs_p": logs_p, "y_mask": y_mask,
                                   "attn_squeezed": attn_squeezed,
@@ -140,6 +195,10 @@ class ComponentRunner:
     def decoder(self, z_buf):
         outs = self._run("decoder", {"z": z_buf})
         return outs[0]
+
+    def overlap_add(self, curr_chunk, prev_tail, is_first):
+        outs = self._run("overlap_add", {"curr_chunk": curr_chunk, "prev_tail": prev_tail, "is_first": is_first})
+        return outs[0], outs[1]
 
 
 def synthesize(comp: ComponentRunner, phoneme_ids: list[int],
@@ -157,11 +216,8 @@ def synthesize(comp: ComponentRunner, phoneme_ids: list[int],
         np.array([noise_scale_w], dtype=np.float32),
     )
 
-    y_lengths = int(y_lengths[0])
-    y_mask = (np.arange(UPSAMPLED_MAX_SEQ_LEN) < y_lengths)[None, None, :].astype(np.float32)
-    attn_mask = x_mask[:, :, None, :] * y_mask[:, :, :, None]
-    attn = generate_path_np(w_ceil, attn_mask)
-    attn_squeezed = attn[:, 0, :, :].astype(np.float32)  # [1, t_y, t_x]
+    yl_int = int(y_lengths[0])
+    attn_squeezed, y_mask = comp.monotonic_aligner(w_ceil, x_mask, np.array([yl_int], dtype=np.int32))
 
     z = comp.flow(m_p, logs_p, y_mask, attn_squeezed,
                   np.array([noise_scale], dtype=np.float32))
@@ -173,7 +229,7 @@ def synthesize(comp: ComponentRunner, phoneme_ids: list[int],
     audio_chunk = comp.decoder(z_buf)
     audio = audio_chunk.squeeze()[:MAX_DEC_SEQ_LEN * UPSAMPLE_FACTOR]
     total = MAX_DEC_SEQ_LEN
-    while total < min(y_lengths, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
+    while total < min(yl_int, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
         z_buf = z[:, :, total - DEC_SEQ_OVERLAP: total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP]
         audio_chunk = comp.decoder(z_buf)
         audio_chunk = audio_chunk.squeeze()[DEC_SEQ_OVERLAP * UPSAMPLE_FACTOR:
@@ -181,8 +237,8 @@ def synthesize(comp: ComponentRunner, phoneme_ids: list[int],
         audio = np.concatenate([audio, audio_chunk])
         total += MAX_DEC_SEQ_LEN
 
-    audio = audio[:y_lengths * UPSAMPLE_FACTOR]
-    return audio, y_lengths, z, attn_squeezed, w_ceil
+    audio = audio[:yl_int * UPSAMPLE_FACTOR]
+    return audio, yl_int, z, attn_squeezed, w_ceil
 
 
 def main():
@@ -207,9 +263,19 @@ def main():
     logger.info("audio: %d samples (%.2fs), y_lengths=%d",
                 len(audio), len(audio) / SAMPLE_RATE, y_lengths)
 
-    import soundfile as sf
     args.out_wav.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(args.out_wav), audio.astype(np.float32), SAMPLE_RATE)
+    try:
+        import soundfile as sf
+        sf.write(str(args.out_wav), audio.astype(np.float32), SAMPLE_RATE)
+    except ImportError:
+        import wave
+        audio_clipped = np.clip(audio, -1.0, 1.0)
+        int16_data = (audio_clipped * 32767.0).astype(np.int16)
+        with wave.open(str(args.out_wav), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(int16_data.tobytes())
     logger.info("saved %s", args.out_wav)
 
 
