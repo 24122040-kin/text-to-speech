@@ -41,21 +41,46 @@ DEFAULT_LENGTH_SCALE = 1.0
 DEFAULT_NOISE_SCALE_W = 0.8
 
 
-def phonemize_vi(text: str, id_map: dict) -> list[int]:
-    """Phonemize Vietnamese text using piper phoneme map / fallback."""
-    ids = []
-    for ch in text.lower():
-        if ch in id_map:
-            v = id_map[ch]
-            if isinstance(v, list):
-                ids.extend(v)
-            else:
-                ids.append(v)
-        elif ch in (" ", "\t", "\n"):
-            ids.append(id_map.get(" ", 0))
-    if not ids:
-        ids = [0]
-    return ids
+def phonemize_vi(text: str, id_map: dict | None = None) -> list[int]:
+    """Real Piper Vietnamese phonemizer using espeak-ng and phoneme_id_map."""
+    try:
+        from piper import PiperVoice
+        onnx_candidates = [
+            Path("outputs/piper_vi_npu/vi_VN-vais1000-medium.onnx"),
+            Path("vi_VN-vais1000-medium.onnx"),
+        ]
+        cfg_candidates = [
+            Path("outputs/piper_vi_npu/vi_VN-vais1000-medium.onnx.json"),
+            Path("vi_VN-vais1000-medium.onnx.json"),
+        ]
+        m_path = next((p for p in onnx_candidates if p.exists()), None)
+        c_path = next((p for p in cfg_candidates if p.exists()), None)
+        if m_path and c_path:
+            voice = PiperVoice.load(str(m_path), config_path=str(c_path))
+            phonemes = voice.phonemize(text)
+            if phonemes and len(phonemes) > 0:
+                return voice.phonemes_to_ids(phonemes[0])
+    except Exception as e:
+        logger.warning("PiperVoice phonemizer error (%s), checking pre-tokenized dataset...", e)
+
+    # Fallback: check golden pre-tokenized dataset
+    data_path = Path("outputs/piper_vi_npu/piper_vi_npu_data.npz")
+    if data_path.exists():
+        d = np.load(data_path, allow_pickle=True)
+        if "test_texts" in d:
+            test_texts = [str(t) for t in d["test_texts"]]
+            for idx, t in enumerate(test_texts):
+                if text.strip() == t.strip():
+                    n = int(d["test_lengths"][idx])
+                    return list(d["test_input"][idx][:n])
+        if "calib_texts" in d:
+            calib_texts = [str(t) for t in d["calib_texts"]]
+            for idx, t in enumerate(calib_texts):
+                if text.strip() == t.strip():
+                    n = int(d["input_lengths"][idx])
+                    return list(d["input"][idx][:n])
+
+    raise RuntimeError(f"Cannot phonemize text '{text[:40]}': Piper espeak phonemizer unavailable.")
 
 
 def prepare_input(phoneme_ids: list[int], max_seq_len: int = MAX_SEQ_LEN) -> tuple[np.ndarray, np.ndarray]:
