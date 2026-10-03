@@ -184,7 +184,7 @@ class ZeroCPUE2EPipeline:
             )[0]
 
             if chunk_idx == 0:
-                ttfa_ms = (time.perf_counter() - t_first_chunk_start) * 1000.0
+                ttfa_ms = (time.perf_counter() - t_start) * 1000.0
 
             audio_22k_chunks.append(pcm_22k_block.squeeze())
             audio_16k_chunks.append(pcm_16k_block.squeeze())
@@ -272,7 +272,7 @@ def main():
             "y_lengths": res["y_lengths"],
             "num_chunks": res["num_chunks"],
             "duration_sec": round(res["duration_sec"], 3),
-            "ttfa_ms": round(res["ttfa_ms"], 2),
+            "ttfa_ms": round(res["ttfa_ms"], 2) if res["ttfa_ms"] is not None else 0.0,
             "latency_total_ms": round(res["t_total_sec"] * 1000.0, 2),
             "rtf": round(res["rtf"], 4),
             "audio_stats_22k": {"peak": round(peak_22k, 4), "rms": round(rms_22k, 4)},
@@ -283,9 +283,10 @@ def main():
         }
 
         results.append(sample_record)
+        ttfa_disp = res["ttfa_ms"] if res["ttfa_ms"] is not None else 0.0
         logger.info(
             "  🔊 Âm thanh chuẩn: Độ dài=%.2fs | Peak=%.3f | RMS=%.3f | TTFA=%.1f ms | RTF=%.4f",
-            res["duration_sec"], peak_22k, rms_22k, res["ttfa_ms"], res["rtf"]
+            res["duration_sec"], peak_22k, rms_22k, ttfa_disp, res["rtf"]
         )
 
     # Calculate Aggregated Statistics
@@ -294,14 +295,17 @@ def main():
     durations = [r["duration_sec"] for r in results]
     total_latencies = [r["latency_total_ms"] for r in results]
 
+    mean_rtf_val = round(float(np.mean(rtfs)), 4) if rtfs else 0.0
+    rtf_status = "Nhanh hơn thời gian thực (Real-time)" if mean_rtf_val < 1.0 else "Chậm hơn thời gian thực"
+
     summary = {
         "num_samples_evaluated": len(results),
-        "mean_ttfa_ms": round(float(np.mean(ttfas)), 2),
-        "min_ttfa_ms": round(float(np.min(ttfas)), 2),
-        "mean_rtf": round(float(np.mean(rtfs)), 4),
-        "total_speech_duration_sec": round(float(np.sum(durations)), 2),
-        "mean_latency_ms": round(float(np.mean(total_latencies)), 2),
-        "zero_cpu_status": "100% Zero-CPU (Pure Static NPU Graphs)",
+        "mean_ttfa_ms": round(float(np.mean(ttfas)), 2) if ttfas else 0.0,
+        "min_ttfa_ms": round(float(np.min(ttfas)), 2) if ttfas else 0.0,
+        "mean_rtf": mean_rtf_val,
+        "total_speech_duration_sec": round(float(np.sum(durations)), 2) if durations else 0.0,
+        "mean_latency_ms": round(float(np.mean(total_latencies)), 2) if total_latencies else 0.0,
+        "zero_cpu_status": "Static NPU Tensor Graphs (ONNX CPU Runtime)",
     }
 
     out_json = args.out_dir / "evaluation_summary.json"
@@ -311,9 +315,8 @@ def main():
     logger.info("=== KẾT QUẢ ĐÁNH GIÁ TOÀN DIỆN END-TO-END (TRAINED VOICE PIPELINE) ===")
     logger.info("Tổng số câu đánh giá:        %d câu", summary["num_samples_evaluated"])
     logger.info("Độ trễ phản hồi đầu (TTFA):  %.2f ms (Trung bình)", summary["mean_ttfa_ms"])
-    logger.info("Real-Time Factor (RTF):      %.4f (Nhanh hơn thời gian thực)", summary["mean_rtf"])
+    logger.info("Real-Time Factor (RTF):      %.4f (%s)", summary["mean_rtf"], rtf_status)
     logger.info("Tổng thời lượng phát âm:     %.2f giây", summary["total_speech_duration_sec"])
-    logger.info("Trạng thái CPU:              0.0% CPU Host (100% NPU Ma Trận Tĩnh)")
     logger.info("Báo cáo chi tiết đã lưu tại: %s", out_json)
 
 

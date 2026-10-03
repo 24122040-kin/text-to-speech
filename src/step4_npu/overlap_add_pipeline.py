@@ -194,16 +194,27 @@ def export_overlap_add_onnx(output_path: Path, crossfade_mode: str = "hann") -> 
     dummy_prev_tail = torch.randn(1, 1, OVERLAP_AUDIO_LEN, dtype=torch.float32)
     dummy_is_first = torch.tensor([1.0], dtype=torch.float32)
 
-    torch.onnx.export(
-        model,
-        (dummy_curr_chunk, dummy_prev_tail, dummy_is_first),
-        str(output_path),
-        input_names=["curr_chunk", "prev_tail", "is_first"],
-        output_names=["pcm_out", "next_tail"],
-        opset_version=15,
-        do_constant_folding=True,
-        dynamo=False,
-    )
+    try:
+        torch.onnx.export(
+            model,
+            (dummy_curr_chunk, dummy_prev_tail, dummy_is_first),
+            str(output_path),
+            input_names=["curr_chunk", "prev_tail", "is_first"],
+            output_names=["pcm_out", "next_tail"],
+            opset_version=15,
+            do_constant_folding=True,
+            dynamo=False,
+        )
+    except (TypeError, ModuleNotFoundError):
+        torch.onnx.export(
+            model,
+            (dummy_curr_chunk, dummy_prev_tail, dummy_is_first),
+            str(output_path),
+            input_names=["curr_chunk", "prev_tail", "is_first"],
+            output_names=["pcm_out", "next_tail"],
+            opset_version=15,
+            do_constant_folding=True,
+        )
     logger.info("Exported Overlap-Add ONNX successfully: %s", output_path)
     return output_path
 
@@ -231,11 +242,14 @@ def audit_overlap_add_onnx(onnx_path: Path):
     for op, count in sorted(op_counts.items()):
         logger.info("  • Op: %-16s Count: %d", op, count)
 
-    logger.info("Phụ thuộc CPU Host: 0.0% (100% Vectorized NPU Accelerator)")
+    if len(found_cf_ops) == 0:
+        logger.info("Xác nhận: 100% Static Tensor Graph, tương thích HTP HMX/HVX.")
+    else:
+        logger.warning("Cảnh báo: Phát hiện toán tử điều khiển host: %s", found_cf_ops)
     return op_counts, len(found_cf_ops)
 
 
-def test_overlap_add_pipeline():
+def test_overlap_add_pipeline(crossfade_mode: str = "hann", out_onnx_path: Path | None = None):
     """Comprehensive test: Bit-Exact Verification & Smooth Audio Transition Verification."""
     logger.info("=== BẮT ĐẦU KIỂM THỬ TOÀN DIỆN OVERLAP-ADD (BÀI TOÁN 4) ===")
 
@@ -271,7 +285,7 @@ def test_overlap_add_pipeline():
     logger.info("  ✅ Xác nhận: Khớp chính xác bit 100%% với Reference gốc!")
 
     # 2. Test Hann Smooth Crossfade (Click/Pop Elimination)
-    hann_model = VectorizedOverlapAdd(crossfade_mode="hann")
+    hann_model = VectorizedOverlapAdd(crossfade_mode=crossfade_mode)
     hann_model.eval()
 
     npu_hann_blocks = []
@@ -304,8 +318,9 @@ def test_overlap_add_pipeline():
         diff = abs(npu_hann_audio[idx] - npu_hann_audio[idx - 1])
         boundary_diffs.append(diff)
     max_boundary_diff = max(boundary_diffs)
-    logger.info("  • Bước nhảy biên độ tối đa tại điểm nối: %.6f (Mượt tuyệt đối)", max_boundary_diff)
-    logger.info("  ✅ Xác nhận: Không có hiện tượng gián đoạn hay tiếng nổ Clicks/Pops!")
+    logger.info("  • Bước nhảy biên độ tối đa tại điểm nối: %.6f", max_boundary_diff)
+    assert max_boundary_diff < 0.25, f"Bước nhảy biên độ quá lớn tại điểm nối ({max_boundary_diff})"
+    logger.info("  ✅ Xác nhận: Biên độ chuyển tiếp đạt độ mịn an toàn!")
 
     # 3. Test Combined Direction 1 + Direction 2 (Streaming Ping-Pong Accumulator)
     logger.info("--- Kiểm thử 3: Kết hợp Hướng 1 (Vectorized Math) + Hướng 2 (Streaming Ping-Pong TCM DMA) ---")
@@ -319,22 +334,23 @@ def test_overlap_add_pipeline():
     stream_diff = np.max(np.abs(streamed_audio - npu_hann_audio))
     logger.info("  • Sai số giữa Ping-Pong DMA Streaming vs Batch Crossfade: %.8f", stream_diff)
     assert stream_diff < 1e-6, "Ping-Pong mismatch!"
-    logger.info("  ✅ Xác nhận: Hướng 1 + Hướng 2 kết hợp hoàn hảo, 0% CPU RAM reallocation, sẵn sàng stream trực tiếp ra DAC!")
+    logger.info("  ✅ Xác nhận: Hướng 1 + Hướng 2 kết hợp hoàn hảo, sẵn sàng stream trực tiếp ra DAC!")
 
-    # 3. Export ONNX and Audit
-    onnx_out_path = Path("outputs/piper_vi_npu/components/overlap_add.onnx")
-    export_overlap_add_onnx(onnx_out_path, crossfade_mode="hann")
-    audit_overlap_add_onnx(onnx_out_path)
+    # 4. Export ONNX and Audit
+    if out_onnx_path is None:
+        out_onnx_path = Path("outputs/piper_vi_npu/components/overlap_add.onnx")
+    export_overlap_add_onnx(out_onnx_path, crossfade_mode=crossfade_mode)
+    audit_overlap_add_onnx(out_onnx_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 4 NPU -- Overlap-Add & Crossfade Pipeline")
-    parser.add_argument("--export_onnx", action="store_true", default=True, help="Export ONNX model")
+    parser.add_argument("--export_onnx", action="store_true", help="Export ONNX model")
     parser.add_argument("--crossfade", default="hann", choices=["hann", "linear", "exact"])
     parser.add_argument("--out_onnx", type=Path, default=Path("outputs/piper_vi_npu/components/overlap_add.onnx"))
     args = parser.parse_args()
 
-    test_overlap_add_pipeline()
+    test_overlap_add_pipeline(crossfade_mode=args.crossfade, out_onnx_path=args.out_onnx)
 
 
 if __name__ == "__main__":

@@ -70,7 +70,6 @@ class ZeroCPUNPUDriver:
         opts.intra_op_num_threads = 4
 
         # Load all 8 Static NPU Graphs
-        self.sess_byte_enc = ort.InferenceSession(str(components_dir / "byte_text_encoder.onnx"), opts)
         self.sess_enc = ort.InferenceSession(str(components_dir / "piper_vi_encoder.onnx"), opts)
         self.sess_sdp = ort.InferenceSession(str(components_dir / "piper_vi_sdp.onnx"), opts)
         self.sess_align = ort.InferenceSession(str(components_dir / "monotonic_aligner.onnx"), opts)
@@ -92,13 +91,15 @@ class ZeroCPUNPUDriver:
         self.dma_ring_buffer = np.zeros((1, ENCODER_HIDDEN_DIM, FLOW_OUT_LEN), dtype=np.float32)
         self.dma_tail_buffer = np.zeros((1, 1, OVERLAP_AUDIO_LEN), dtype=np.float32)
 
-        logger.info("✅ All 8 NPU Graphs & Zero-Copy DMA Buffers Configured Successfully!")
+        logger.info("✅ All NPU Graphs & Zero-Copy DMA Buffers Configured Successfully!")
 
     def synthesize(self, phoneme_tokens: np.ndarray, phoneme_length: int) -> dict:
         """Executes full NPU pipeline with Zero Host Copy via IOBinding & DMA Slicing."""
         t_start = time.perf_counter()
 
         # Step 1: Format Input Buffer (Direct Memory Fill)
+        if phoneme_length > MAX_SEQ_LEN:
+            logger.warning("Input phoneme length (%d) exceeds MAX_SEQ_LEN (%d); truncating.", phoneme_length, MAX_SEQ_LEN)
         valid_len = min(phoneme_length, MAX_SEQ_LEN)
         self.buf_x.fill(0)
         self.buf_x[0, :valid_len] = phoneme_tokens[:valid_len].astype(np.int32)
@@ -164,6 +165,8 @@ class ZeroCPUNPUDriver:
         t_flow = time.perf_counter() - t_flow0
 
         # Write Flow output directly to DMA Ring Buffer
+        if y_len > FLOW_OUT_LEN:
+            logger.warning("Generated acoustic frame length (%d) exceeds FLOW_OUT_LEN (%d); truncating.", y_len, FLOW_OUT_LEN)
         self.dma_ring_buffer.fill(0.0)
         copy_len = min(z.shape[2], FLOW_OUT_LEN)
         self.dma_ring_buffer[:, :, :copy_len] = z[:, :, :copy_len]
@@ -175,7 +178,6 @@ class ZeroCPUNPUDriver:
         total_frames = min(y_len, copy_len)
         chunk_idx = 0
         ttfa_ms = None
-        t_first_start = time.perf_counter()
 
         cur_frame_pos = 0
         while cur_frame_pos < total_frames:
@@ -229,7 +231,8 @@ class ZeroCPUNPUDriver:
             pcm_16k_block = io_resample.get_outputs()[0].numpy()
 
             if chunk_idx == 0:
-                ttfa_ms = (time.perf_counter() - t_first_start) * 1000.0
+                # TTFA is measured from initial synthesize request until first audio block is ready
+                ttfa_ms = (time.perf_counter() - t_start) * 1000.0
 
             audio_22k_chunks.append(pcm_22k_block.squeeze())
             audio_16k_chunks.append(pcm_16k_block.squeeze())
@@ -302,19 +305,21 @@ def main():
         save_wav_pcm(wav_22k, res["audio_22k"], SR_NATIVE)
         save_wav_pcm(wav_16k, res["audio_16k"], SR_RESAMPLED)
 
+        ttfa_val = res["ttfa_ms"] if res["ttfa_ms"] is not None else 0.0
         logger.info("  ⚡ TTFA: %.2f ms | Duration: %.2f s | RTF: %.4f | Chunks: %d",
-                    res["ttfa_ms"], res["duration_sec"], res["rtf"], res["num_chunks"])
+                    ttfa_val, res["duration_sec"], res["rtf"], res["num_chunks"])
         results.append({
             "idx": idx,
             "text": text,
-            "ttfa_ms": round(res["ttfa_ms"], 2),
+            "ttfa_ms": round(ttfa_val, 2),
             "duration_sec": round(res["duration_sec"], 3),
             "rtf": round(res["rtf"], 4),
             "num_chunks": res["num_chunks"],
         })
 
     # Summary
-    mean_ttfa = np.mean([r["ttfa_ms"] for r in results])
+    ttfa_list = [r["ttfa_ms"] for r in results]
+    mean_ttfa = np.mean(ttfa_list) if ttfa_list else 0.0
     mean_rtf = np.mean([r["rtf"] for r in results])
     total_dur = np.sum([r["duration_sec"] for r in results])
 

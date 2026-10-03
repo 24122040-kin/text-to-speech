@@ -192,10 +192,8 @@ def build_model_from_onnx(onnx_path: str, config_path: str) -> SynthesizerTrn:
     expected_missing = {"enc_q.", "dp.post_", "dp.flows.1.", "dp.flows.0.logs"}
     real_missing = [k for k in missing if not any(k.startswith(p) for p in expected_missing)]
     if real_missing:
-        logger.warning("Inference-critical missing (%d): %s",
-                       len(real_missing), real_missing[:10])
-    else:
-        logger.info("All inference-critical weights loaded!")
+        raise RuntimeError(f"Missing {len(real_missing)} inference-critical parameters during weight conversion: {real_missing[:10]}")
+    logger.info("All inference-critical weights loaded successfully!")
 
     model_g.load_state_dict(new_state_dict, strict=True)
     model_g.eval()

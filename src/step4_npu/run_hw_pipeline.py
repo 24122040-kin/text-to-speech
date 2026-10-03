@@ -75,8 +75,8 @@ DEFAULT_NOISE_SCALE = 0.667
 DEFAULT_LENGTH_SCALE = 1.0
 DEFAULT_NOISE_SCALE_W = 0.8
 
-# QNN output order for encoder: [m_p, logs_p, x_encoded, x_mask]
-ENC_OUT = {"m_p": 0, "logs_p": 1, "x_encoded": 2, "x_mask": 3}
+# QNN output order for encoder: [x_encoded, m_p, logs_p, x_mask]
+ENC_OUT = {"x_encoded": 0, "m_p": 1, "logs_p": 2, "x_mask": 3}
 
 
 def _find_model(comp: str, output_dir: Path) -> Path:

@@ -40,6 +40,8 @@ def build_sinc_resample_matrix(
 ) -> torch.Tensor:
     """Computes high-fidelity Anti-Aliasing Windowed-Sinc Resampling Matrix (SNR > 80 dB).
     
+    Computes in column blocks in float32 to keep peak RAM < 20 MB during construction.
+    
     Args:
         n_in: Input sequence length.
         n_out: Output sequence length.
@@ -53,39 +55,38 @@ def build_sinc_resample_matrix(
     ratio = sr_out / sr_in
     cutoff = min(1.0, ratio)  # Anti-aliasing cutoff (at 8 kHz Nyquist limit)
 
-    t_out = np.arange(n_out, dtype=np.float64) / sr_out
-    t_in = np.arange(n_in, dtype=np.float64) / sr_in
+    t_out = np.arange(n_out, dtype=np.float32) / sr_out
+    t_in = np.arange(n_in, dtype=np.float32) / sr_in
 
-    # Distance matrix in input sample units: [n_in, n_out]
-    d = (t_in[:, None] - t_out[None, :]) * sr_in
-
-    # Anti-Aliasing Sinc Kernel: sinc(cutoff * d)
-    sinc_val = np.sinc(cutoff * d)
-
-    # High-attenuation Blackman-Nutall / Kaiser window for > 85 dB stopband rejection
-    # Window is evaluated on d / filter_radius in range [-1, 1]
-    norm_d = d / filter_radius
-    valid_mask = np.abs(norm_d) <= 1.0
-
-    # 4-term Blackman-Harris window:
-    # w(x) = a0 - a1*cos(pi*(x+1)) + a2*cos(2*pi*(x+1)) - a3*cos(3*pi*(x+1))
+    # 4-term Blackman-Harris window coefficients
     a0, a1, a2, a3 = 0.35875, 0.48829, 0.14128, 0.01168
-    x_shifted = np.pi * (norm_d + 1.0)
-    bh_window = np.where(
-        valid_mask,
-        a0 - a1 * np.cos(x_shifted) + a2 * np.cos(2 * x_shifted) - a3 * np.cos(3 * x_shifted),
-        0.0
-    )
+    
+    w_matrix = np.zeros((n_in, n_out), dtype=np.float32)
+    block_size = 512
 
-    # Combined impulse response
-    w_matrix = cutoff * sinc_val * bh_window
+    for start in range(0, n_out, block_size):
+        end = min(start + block_size, n_out)
+        t_out_block = t_out[start:end]
+        
+        # Distance matrix in input sample units: [n_in, block_size]
+        d = (t_in[:, None] - t_out_block[None, :]) * sr_in
+        norm_d = d / filter_radius
+        valid_mask = np.abs(norm_d) <= 1.0
 
-    # Exact DC gain normalization (sum across input axis must equal 1.0 for unity DC gain)
-    col_sums = np.sum(w_matrix, axis=0, keepdims=True)
-    col_sums = np.where(np.abs(col_sums) < 1e-8, 1.0, col_sums)
-    w_matrix = w_matrix / col_sums
+        sinc_val = np.sinc(cutoff * d)
+        x_shifted = np.pi * (norm_d + 1.0)
+        bh_window = np.where(
+            valid_mask,
+            a0 - a1 * np.cos(x_shifted) + a2 * np.cos(2 * x_shifted) - a3 * np.cos(3 * x_shifted),
+            0.0,
+        )
 
-    return torch.from_numpy(w_matrix.astype(np.float32))
+        w_block = cutoff * sinc_val * bh_window
+        col_sums = np.sum(w_block, axis=0, keepdims=True)
+        col_sums = np.where(np.abs(col_sums) < 1e-8, 1.0, col_sums)
+        w_matrix[:, start:end] = w_block / col_sums
+
+    return torch.from_numpy(w_matrix)
 
 
 class PureGEMMResampler(nn.Module):
@@ -131,16 +132,27 @@ def export_resampler_onnx(output_path: Path) -> Path:
 
     dummy_input = torch.randn(1, 1, CHUNK_SAMPLES_IN, dtype=torch.float32)
 
-    torch.onnx.export(
-        model,
-        dummy_input,
-        str(output_path),
-        input_names=["audio_22050hz"],
-        output_names=["audio_16000hz"],
-        opset_version=15,
-        do_constant_folding=True,
-        dynamo=False,
-    )
+    try:
+        torch.onnx.export(
+            model,
+            dummy_input,
+            str(output_path),
+            input_names=["audio_22050hz"],
+            output_names=["audio_16000hz"],
+            opset_version=15,
+            do_constant_folding=True,
+            dynamo=False,
+        )
+    except (TypeError, ModuleNotFoundError):
+        torch.onnx.export(
+            model,
+            dummy_input,
+            str(output_path),
+            input_names=["audio_22050hz"],
+            output_names=["audio_16000hz"],
+            opset_version=15,
+            do_constant_folding=True,
+        )
     logger.info("Exported Audio Resampler ONNX successfully: %s", output_path)
     return output_path
 
@@ -163,16 +175,19 @@ def audit_resampler_onnx(onnx_path: Path):
     logger.info("=== KIỂM TOÁN TOÀN DIỆN TOÁN TỬ AUDIO RESAMPLER (BÀI TOÁN 5) ===")
     logger.info("Đường dẫn file: %s", onnx_path)
     logger.info("Tổng số Node tính toán trong đồ thị: %d nodes", len(graph.node))
-    logger.info("Số Node điều khiển rẽ nhánh (If/Loop/Scan): %d (Hoàn toàn bằng 0!)", len(found_cf_ops))
+    logger.info("Số Node điều khiển rẽ nhánh (If/Loop/Scan): %d", len(found_cf_ops))
 
     for op, count in sorted(op_counts.items()):
         logger.info("  • Op: %-16s Count: %d", op, count)
 
-    logger.info("Phụ thuộc CPU Host: 0.0% (100% Pure GEMM HMX Accelerator)")
+    if len(found_cf_ops) == 0:
+        logger.info("Xác nhận: 100% Static Tensor Graph, tương thích HTP HMX.")
+    else:
+        logger.warning("Cảnh báo: Phát hiện toán tử điều khiển host: %s", found_cf_ops)
     return op_counts, len(found_cf_ops)
 
 
-def test_resampler_fidelity():
+def test_resampler_fidelity(out_onnx_path: Path | None = None):
     """Comprehensive test: SNR, Multi-tone Frequency Response & CPU Equivalence."""
     logger.info("=== BẮT ĐẦU KIỂM THỬ ĐỘ CHÍNH XÁC & CHẤT LƯỢNG ÂM HỌC (BÀI TOÁN 5) ===")
 
@@ -198,33 +213,40 @@ def test_resampler_fidelity():
     for f in freqs:
         gt_16k += 0.25 * np.sin(2 * np.pi * f * t_16k)
 
-    # Trim boundary transient samples for steady-state SNR measurement (filter radius = 32)
+    # Measure steady-state interior SNR and full-chunk SNR
     margin = 48
-    sig = gt_16k[margin:-margin]
-    noise = out_npu[margin:-margin] - sig
-    snr_db = 10 * np.log10(np.sum(sig ** 2) / (np.sum(noise ** 2) + 1e-12))
+    sig_interior = gt_16k[margin:-margin]
+    noise_interior = out_npu[margin:-margin] - sig_interior
+    snr_interior_db = 10 * np.log10(np.sum(sig_interior ** 2) / (np.sum(noise_interior ** 2) + 1e-12))
+
+    sig_full = gt_16k
+    noise_full = out_npu - sig_full
+    snr_full_db = 10 * np.log10(np.sum(sig_full ** 2) / (np.sum(noise_full ** 2) + 1e-12))
 
     logger.info("--- Kết quả Kiểm Thử Độ Trung Thực Âm Học ---")
     logger.info("  • Kích thước đầu vào (22.05 kHz): %d samples", CHUNK_SAMPLES_IN)
     logger.info("  • Kích thước đầu ra  (16.00 kHz): %d samples", CHUNK_SAMPLES_OUT)
     logger.info("  • Tỉ lệ biến đổi: %.6f (Chuẩn 320/441)", CHUNK_SAMPLES_OUT / CHUNK_SAMPLES_IN)
-    logger.info("  • Tỉ số Tín hiệu trên Nhiễu (SNR): %.2f dB (Đạt chuẩn Studio > 60 dB!)", snr_db)
-    assert snr_db > 60.0, f"SNR quá thấp: {snr_db} dB"
-    logger.info("  ✅ Xác nhận: Độ trung thực âm thanh hoàn hảo, không méo hài!")
+    logger.info("  • SNR (Vùng giữa / Steady-State): %.2f dB", snr_interior_db)
+    logger.info("  • SNR (Toàn bộ chunk bao gồm biên): %.2f dB", snr_full_db)
+    assert snr_interior_db > 60.0, f"SNR steady-state quá thấp: {snr_interior_db} dB"
+    assert snr_full_db > 40.0, f"SNR full-chunk quá thấp: {snr_full_db} dB"
+    logger.info("  ✅ Xác nhận: Độ trung thực âm thanh đạt yêu cầu!")
 
     # 2. Export ONNX and Audit
-    onnx_out_path = Path("outputs/piper_vi_npu/components/audio_resampler.onnx")
-    export_resampler_onnx(onnx_out_path)
-    audit_resampler_onnx(onnx_out_path)
+    if out_onnx_path is None:
+        out_onnx_path = Path("outputs/piper_vi_npu/components/audio_resampler.onnx")
+    export_resampler_onnx(out_onnx_path)
+    audit_resampler_onnx(out_onnx_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 4 NPU -- Audio Resampler (22.05kHz -> 16kHz)")
-    parser.add_argument("--export_onnx", action="store_true", default=True, help="Export ONNX model")
+    parser.add_argument("--export_onnx", action="store_true", help="Export ONNX model")
     parser.add_argument("--out_onnx", type=Path, default=Path("outputs/piper_vi_npu/components/audio_resampler.onnx"))
     args = parser.parse_args()
 
-    test_resampler_fidelity()
+    test_resampler_fidelity(args.out_onnx)
 
 
 if __name__ == "__main__":

@@ -287,19 +287,20 @@ def audit_onnx_model(onnx_path: Path):
     logger.info("Số Node điều khiển rẽ nhánh (If/Loop/Scan): %d", len(found_cf))
     for op, cnt in sorted(op_counts.items()):
         logger.info("  • Op: %-16s Count: %d", op, cnt)
-    logger.info("Phụ thuộc CPU Host: 0.0% (100% Vectorized NPU Execution)")
-
+    if len(found_cf) == 0:
+        logger.info("Xác nhận: 100% Static Tensor Graph, tương thích HTP HMX/HVX.")
+    else:
+        logger.warning("Cảnh báo: Phát hiện toán tử điều khiển host: %s", found_cf)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Piper Streaming Slicer & DMA Ring Buffer (Method A)")
     parser.add_argument("--onnx_dir", type=Path, default=Path("outputs/piper_vi_npu/components"))
-    parser.add_argument("--export_onnx", action="store_true", default=True)
+    parser.add_argument("--export_onnx", action="store_true", help="Export ONNX model")
     args = parser.parse_args()
 
     slicer_onnx_path = args.onnx_dir / "streaming_slicer.onnx"
-    if args.export_onnx:
-        export_streaming_slicer_onnx(slicer_onnx_path)
+    export_streaming_slicer_onnx(slicer_onnx_path)
 
     logger.info("=== KIỂM THỬ KHẢ NĂNG STREAMING DMA & ĐỘ CHÍNH XÁC BIT ===")
     # 1. Khởi tạo tensor latent giả lập độ dài 320 frames (~3.7s âm thanh)

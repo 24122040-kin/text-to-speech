@@ -139,7 +139,7 @@ def collect(comp: ComponentRunner, texts: list[str], id_map: dict) -> dict:
             ola_cc.append(chunk_out)
             ola_pt.append(prev_t)
             ola_if.append(np.array([0.0], dtype=np.float32))
-            resamp_in.append(chunk_out[:, :, :STRIDE_AUDIO_LEN].astype(np.float32))
+            resamp_in.append(chunk_out[:, :, OVERLAP_AUDIO_LEN : OVERLAP_AUDIO_LEN + STRIDE_AUDIO_LEN].astype(np.float32))
 
             # Update tail from subsequent chunk
             prev_t = chunk_out[:, :, STRIDE_AUDIO_LEN + OVERLAP_AUDIO_LEN : STRIDE_AUDIO_LEN + 2 * OVERLAP_AUDIO_LEN].copy()

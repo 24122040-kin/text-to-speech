@@ -67,7 +67,11 @@ def tokenize_piper(text: str, phonemizer, id_map: dict) -> list:
     """Real Piper tokenizer: espeak phonemize -> phoneme ids (incl. BOS/EOS/PAD)."""
     from piper.voice import phonemes_to_ids
 
-    phonemes = phonemizer.phonemize("vi", text)[0]
+    res = phonemizer.phonemize("vi", text)
+    if isinstance(res, list) and res and isinstance(res[0], list):
+        phonemes = [p for sent in res for p in sent]
+    else:
+        phonemes = res
     return phonemes_to_ids(phonemes, id_map)
 
 

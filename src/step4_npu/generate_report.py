@@ -55,9 +55,13 @@ def main():
     add("| Hạng mục | Kết quả |")
     add("|---|---|")
     add("| Model | Piper (vi) `vi_VN-vais1000-medium` (VITS end-to-end, 22050 Hz) |")
-    add("| Thiết bị đích | **Dragonwing IQ-9075 EVK** (Qualcomm QCS9075, Hexagon HTP v73, soc_model 77) |")
-    add("| Chạy trên | **NPU thuần (qnn_context_binary — HTP), không CPU fallback** |")
-    add("| 4 sub-model compile | ✅ encoder / sdp / flow / decoder — **SUCCESS cả 4** |")
+    compile_jobs = [j for j in joblog if j.get("job_type") == "compile"]
+    if compile_jobs:
+        n_succ = sum(1 for j in compile_jobs if "success" in str(j.get("status", "")).lower())
+        compile_status = f"✅ encoder / sdp / flow / decoder ({n_succ}/{len(compile_jobs)} compiled)"
+    else:
+        compile_status = "Graph tĩnh ONNX sẵn sàng cho QNN HTP compile"
+    add(f"| 4 sub-model compile | {compile_status} |")
     add("| Precision | float → **fp16 trên HTP** (recipe chính thức Qualcomm cho Piper) |")
     sim_summary = sim.get("summary", {})
     if sim_summary:
