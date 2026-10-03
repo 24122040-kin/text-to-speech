@@ -248,18 +248,26 @@ def synthesize(comp: ComponentRunner, phoneme_ids: list[int],
                   np.array([noise_scale], dtype=np.float32))
 
     # sliding-window decode
-    z_buf = np.zeros((1, ENCODER_HIDDEN_DIM, MAX_DEC_SEQ_LEN + 2 * DEC_SEQ_OVERLAP),
-                     dtype=np.float32)
-    z_buf[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)] = z[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)]
+    dec_win_len = MAX_DEC_SEQ_LEN + 2 * DEC_SEQ_OVERLAP
+    z_buf = np.zeros((1, ENCODER_HIDDEN_DIM, dec_win_len), dtype=np.float32)
+    first_len = min(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP, yl_int)
+    z_buf[:, :, :first_len] = z[:, :, :first_len]
     audio_chunk = comp.decoder(z_buf)
     audio = audio_chunk.squeeze()[:MAX_DEC_SEQ_LEN * UPSAMPLE_FACTOR]
     total = MAX_DEC_SEQ_LEN
-    while total < min(yl_int, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
-        z_buf = z[:, :, total - DEC_SEQ_OVERLAP: total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP]
+    while total < yl_int:
+        start_f = total - DEC_SEQ_OVERLAP
+        end_f = total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP
+        actual_end = min(end_f, yl_int, z.shape[2])
+        z_buf = np.zeros((1, ENCODER_HIDDEN_DIM, dec_win_len), dtype=np.float32)
+        if start_f < z.shape[2] and actual_end > start_f:
+            valid_span = actual_end - start_f
+            z_buf[:, :, :valid_span] = z[:, :, start_f:actual_end]
         audio_chunk = comp.decoder(z_buf)
-        audio_chunk = audio_chunk.squeeze()[DEC_SEQ_OVERLAP * UPSAMPLE_FACTOR:
-                                            (MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP) * UPSAMPLE_FACTOR]
-        audio = np.concatenate([audio, audio_chunk])
+        chunk_valid_frames = min(MAX_DEC_SEQ_LEN, max(0, yl_int - total))
+        valid_audio = audio_chunk.squeeze()[DEC_SEQ_OVERLAP * UPSAMPLE_FACTOR:
+                                            (DEC_SEQ_OVERLAP + chunk_valid_frames) * UPSAMPLE_FACTOR]
+        audio = np.concatenate([audio, valid_audio])
         total += MAX_DEC_SEQ_LEN
 
     audio = audio[:yl_int * UPSAMPLE_FACTOR]

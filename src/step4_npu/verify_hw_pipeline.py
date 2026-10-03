@@ -60,12 +60,19 @@ def _cos(a, b):
 def decode_all(comp, z, yl):
     """Sliding-window vocoder decode (fp32 reference), same windows as NPU."""
     out = []
+    first_len = min(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP, yl)
     zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
-    zb[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)] = z[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)]
+    zb[:, :, :first_len] = z[:, :, :first_len]
     out.append(comp.decoder(zb).flatten()[:MAX_DEC_SEQ_LEN * UPSAMPLE_FACTOR])
     total = MAX_DEC_SEQ_LEN
-    while total < min(yl, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
-        zb = z[:, :, total - DEC_SEQ_OVERLAP: total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP]
+    while total < yl:
+        start_f = total - DEC_SEQ_OVERLAP
+        end_f = total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP
+        actual_end = min(end_f, yl, z.shape[2])
+        zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
+        if start_f < z.shape[2] and actual_end > start_f:
+            valid_span = actual_end - start_f
+            zb[:, :, :valid_span] = z[:, :, start_f:actual_end]
         out.append(comp.decoder(zb).flatten()[DEC_SEQ_OVERLAP * UPSAMPLE_FACTOR:
                                                (MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP) * UPSAMPLE_FACTOR])
         total += MAX_DEC_SEQ_LEN

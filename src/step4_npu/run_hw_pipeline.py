@@ -323,12 +323,19 @@ def stage_dec(output_dir: Path):
         z = np.asarray(z_i).reshape(1, ENCODER_HIDDEN_DIM, UPSAMPLED_MAX_SEQ_LEN).astype(np.float32)
         yl = int(yls[i])
         zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
-        zb[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)] = z[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)]
+        first_len = min(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP, yl)
+        zb[:, :, :first_len] = z[:, :, :first_len]
         z_windows.append(zb)
         sample_ids.append(i)
         total = MAX_DEC_SEQ_LEN
-        while total < min(yl, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
-            zb = z[:, :, total - DEC_SEQ_OVERLAP : total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP]
+        while total < yl:
+            start_f = total - DEC_SEQ_OVERLAP
+            end_f = total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP
+            actual_end = min(end_f, yl, z.shape[2])
+            zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
+            if start_f < z.shape[2] and actual_end > start_f:
+                valid_span = actual_end - start_f
+                zb[:, :, :valid_span] = z[:, :, start_f:actual_end]
             z_windows.append(zb)
             sample_ids.append(i)
             total += MAX_DEC_SEQ_LEN
@@ -361,11 +368,38 @@ def stage_ola(output_dir: Path):
     chunks = dec[0]
     n_chunks = len(chunks)
 
-    prev_tail = [np.zeros((1, 1, 3072), dtype=np.float32) for _ in range(n_chunks)]
-    is_first = [np.array([1.0 if i == 0 else 0.0], dtype=np.float32) for i in range(n_chunks)]
+    sample_ids_path = output_dir / "hw" / "dec" / "sample_ids.npy"
+    if sample_ids_path.exists():
+        sample_ids = np.load(sample_ids_path).tolist()
+    else:
+        sample_ids = list(range(n_chunks))
+
+    curr_chunk_list = []
+    prev_tail = []
+    is_first = []
+    seen_samples = {}
+
+    for i in range(n_chunks):
+        sid = sample_ids[i]
+        c = np.asarray(chunks[i]).reshape(1, 1, 16384).astype(np.float32)
+        curr_chunk_list.append(c)
+        if sid not in seen_samples:
+            seen_samples[sid] = 0
+            is_first.append(np.array([1.0], dtype=np.float32))
+            prev_tail.append(np.zeros((1, 1, 3072), dtype=np.float32))
+        else:
+            seen_samples[sid] += 1
+            is_first.append(np.array([0.0], dtype=np.float32))
+            prev_chunk_idx = i - 1
+            prev_c = np.asarray(chunks[prev_chunk_idx]).reshape(1, 1, 16384).astype(np.float32)
+            if seen_samples[sid] == 1:
+                tail = prev_c[:, :, 10240:13312]
+            else:
+                tail = prev_c[:, :, 13312:16384]
+            prev_tail.append(tail)
 
     inputs = {
-        "curr_chunk": [np.asarray(chunks[i]).reshape(1, 1, 16384).astype(np.float32) for i in range(n_chunks)],
+        "curr_chunk": curr_chunk_list,
         "prev_tail": prev_tail,
         "is_first": is_first,
     }
@@ -410,7 +444,7 @@ def stage_resample(output_dir: Path):
 
 
 def load_hw_outputs(dir_path: Path):
-    """Load downloaded inference outputs grouped by output index."""
+    """Load downloaded inference outputs grouped by output index with metadata awareness."""
     h5_files = sorted(dir_path.glob("*.h5"), key=lambda p: p.stat().st_mtime)
     if h5_files:
         import h5py

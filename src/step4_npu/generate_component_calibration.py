@@ -104,14 +104,15 @@ def collect(comp: ComponentRunner, texts: list[str], id_map: dict) -> dict:
         z = comp.flow(m_p, logs_p, y_mask, attn_sq, ns_arr)
 
         # 6. Decoder sliding windows & Vocoder inference
+        first_len = min(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP, yl_int)
         zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
-        zb[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)] = z[:, :, :(MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP)]
+        zb[:, :, :first_len] = z[:, :, :first_len]
         dec_z.append(zb)
 
         prev_t = np.zeros((1, 1, OVERLAP_AUDIO_LEN), dtype=np.float32)
         chunk_out = comp.decoder(zb).reshape(1, 1, CHUNK_AUDIO_LEN).astype(np.float32)
 
-        # 7. Overlap-Add inputs
+        # 7. Overlap-Add inputs (first chunk)
         ola_cc.append(chunk_out)
         ola_pt.append(prev_t)
         ola_if.append(np.array([1.0], dtype=np.float32))
@@ -119,10 +120,19 @@ def collect(comp: ComponentRunner, texts: list[str], id_map: dict) -> dict:
         # 8. Resampler inputs (22.05 kHz -> 16 kHz)
         resamp_in.append(chunk_out[:, :, :STRIDE_AUDIO_LEN].astype(np.float32))
 
+        # Save tail from first chunk
+        prev_t = chunk_out[:, :, STRIDE_AUDIO_LEN : STRIDE_AUDIO_LEN + OVERLAP_AUDIO_LEN].copy()
+
         total = MAX_DEC_SEQ_LEN
         chunk_idx = 1
-        while total < min(yl_int, z.shape[2] - MAX_DEC_SEQ_LEN - DEC_SEQ_OVERLAP):
-            zb = z[:, :, total - DEC_SEQ_OVERLAP : total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP]
+        while total < yl_int:
+            start_f = total - DEC_SEQ_OVERLAP
+            end_f = total + MAX_DEC_SEQ_LEN + DEC_SEQ_OVERLAP
+            actual_end = min(end_f, yl_int, z.shape[2])
+            zb = np.zeros((1, ENCODER_HIDDEN_DIM, DEC_SEQ_LEN), np.float32)
+            if start_f < z.shape[2] and actual_end > start_f:
+                valid_span = actual_end - start_f
+                zb[:, :, :valid_span] = z[:, :, start_f:actual_end]
             dec_z.append(zb)
             chunk_out = comp.decoder(zb).reshape(1, 1, CHUNK_AUDIO_LEN).astype(np.float32)
 
@@ -130,6 +140,9 @@ def collect(comp: ComponentRunner, texts: list[str], id_map: dict) -> dict:
             ola_pt.append(prev_t)
             ola_if.append(np.array([0.0], dtype=np.float32))
             resamp_in.append(chunk_out[:, :, :STRIDE_AUDIO_LEN].astype(np.float32))
+
+            # Update tail from subsequent chunk
+            prev_t = chunk_out[:, :, STRIDE_AUDIO_LEN + OVERLAP_AUDIO_LEN : STRIDE_AUDIO_LEN + 2 * OVERLAP_AUDIO_LEN].copy()
 
             total += MAX_DEC_SEQ_LEN
             chunk_idx += 1
